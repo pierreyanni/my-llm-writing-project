@@ -31,7 +31,7 @@ BASE_DIR = Path(__file__).resolve().parent
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
 TOKEN_PATH = BASE_DIR / "token.json"
 DOWNLOAD_PATH = BASE_DIR / "documents"
-METADATA_CSV = DOWNLOAD_PATH / "METADATA" / "metadata.csv"
+METADATA_CSV = DOWNLOAD_PATH / "metadata.csv"
 # --- End Configuration ---
 
 # MimeTypes for converting Google Docs, Sheets, and Slides for export
