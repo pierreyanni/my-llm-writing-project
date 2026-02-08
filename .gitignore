@@ -17,4 +17,6 @@ __pycache__/
 # data
 data/**/documents/
 *.zip
-
+data/**/token.json
+data/**/credentials.json
+data/**/metadata.csv
