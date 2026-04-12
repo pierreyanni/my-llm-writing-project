@@ -1,5 +1,3 @@
-import os
-import io
 import time
 import csv
 from pathlib import Path
@@ -12,6 +10,7 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
 RETRYABLE_REASONS = {"userRateLimitExceeded", "rateLimitExceeded"}
+RETRYABLE_STATUS_CODES = {403, 429, 500, 502, 503, 504}
 MAX_RETRIES = 5
 
 # Only download text-like formats
@@ -40,19 +39,42 @@ GOOGLE_DOCS_MIMETYPES = {
         "extension": ".docx",
         "mimetype": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     },
-    "application/vnd.google-apps.spreadsheet": {
-        "extension": ".xlsx",
-        "mimetype": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    },
     "application/vnd.google-apps.presentation": {
         "extension": ".pptx",
         "mimetype": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     },
-    "application/vnd.google-apps.drawing": {
-        "extension": ".png",
-        "mimetype": "image/png"
-    },
 }
+
+
+def sanitize_filename(file_name: str) -> str:
+    """Return a filesystem-safe filename while preserving readable names."""
+    cleaned = "".join(c for c in file_name if c.isalnum() or c in (" ", ".", "_", "-")).strip()
+    return cleaned or "untitled"
+
+
+def unique_output_path(download_path: Path, base_name: str, file_id: str) -> Path:
+    """Avoid accidental overwrites when two Drive files share the same name."""
+    candidate = download_path / base_name
+    if not candidate.exists():
+        return candidate
+
+    stem = candidate.stem
+    suffix = candidate.suffix
+    return download_path / f"{stem}_{file_id[:8]}{suffix}"
+
+
+def extract_error_reason(error: HttpError) -> str:
+    details = getattr(error, "error_details", None)
+    if isinstance(details, list) and details:
+        first = details[0]
+        if isinstance(first, dict):
+            return first.get("reason", "")
+    return ""
+
+
+def should_retry(error: HttpError, reason: str) -> bool:
+    status = getattr(getattr(error, "resp", None), "status", None)
+    return reason in RETRYABLE_REASONS or status in RETRYABLE_STATUS_CODES
 
 def authenticate():
     """Handles user authentication and returns service credentials."""
@@ -66,7 +88,12 @@ def authenticate():
             creds.refresh(Request())
         else:
             flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), SCOPES)
-            creds = flow.run_local_server(port=0)
+            flow.redirect_uri = "urn:ietf:wg:oauth:2.0:oob"
+            auth_url, _ = flow.authorization_url(prompt="consent")
+            print(f"\nOpen this URL in your browser:\n{auth_url}\n")
+            code = input("Paste the authorization code here: ").strip()
+            flow.fetch_token(code=code)
+            creds = flow.credentials
         # Save the credentials for the next run
         with TOKEN_PATH.open("w") as token:
             token.write(creds.to_json())
@@ -75,7 +102,7 @@ def authenticate():
 def download_file(service, file_id, file_name, mime_type, download_path):
     """Downloads a single file from Google Drive, handling exports for Google Docs."""
     # Sanitize file name to prevent path issues
-    sanitized_name = "".join(c for c in file_name if c.isalnum() or c in (' ', '.', '_')).rstrip()
+    sanitized_name = sanitize_filename(file_name)
 
     # Handle Google Docs, Sheets, Slides by exporting them to a standard format
     if mime_type in GOOGLE_DOCS_MIMETYPES:
@@ -89,7 +116,7 @@ def download_file(service, file_id, file_name, mime_type, download_path):
         request = service.files().get_media(fileId=file_id)
         file_name_with_ext = sanitized_name
 
-    file_path = download_path / file_name_with_ext
+    file_path = unique_output_path(download_path, file_name_with_ext, file_id)
     
     # Perform the download with progress indication
     with file_path.open("wb") as fh:
@@ -100,9 +127,8 @@ def download_file(service, file_id, file_name, mime_type, download_path):
             try:
                 status, done = downloader.next_chunk()
             except HttpError as e:
-                reason = getattr(e, "resp", None)
-                reason = e.error_details[0]["reason"] if getattr(e, "error_details", None) else ""
-                if reason in RETRYABLE_REASONS and attempt < MAX_RETRIES:
+                reason = extract_error_reason(e)
+                if should_retry(e, reason) and attempt < MAX_RETRIES:
                     sleep = 2 ** attempt
                     print(f"  Rate limited, retrying in {sleep}s...")
                     time.sleep(sleep)
@@ -112,13 +138,23 @@ def download_file(service, file_id, file_name, mime_type, download_path):
                 
             if status:
                 print(f"  Download {int(status.progress() * 100)}%.", end='\r')
-            
+    print(f"  Saved: {file_path.name}")
+    return file_path.name
+
+
+def load_downloaded_ids() -> set:
+    """Return the set of file IDs already recorded in metadata.csv."""
+    if not METADATA_CSV.exists():
+        return set()
+    with METADATA_CSV.open(newline="") as f:
+        reader = csv.DictReader(f)
+        return {row["id"] for row in reader}
 
 
 def main():
     """
     Authenticates with Google Drive, finds all files authored by the user,
-    and downloads them to a local directory.
+    and downloads any that have not been downloaded before.
     """
     try:
         creds = authenticate()
@@ -128,6 +164,9 @@ def main():
         DOWNLOAD_PATH.mkdir(parents=True, exist_ok=True)
         METADATA_CSV.parent.mkdir(parents=True, exist_ok=True)
         print(f"Download directory: {DOWNLOAD_PATH}")
+
+        downloaded_ids = load_downloaded_ids()
+        print(f"Skipping {len(downloaded_ids)} already-downloaded file(s).")
 
         page_token = None
         file_count = 0
@@ -160,17 +199,18 @@ def main():
                     print(f"Skipping {file_name} ({mime_type})")
                     continue
 
-                # Skip folders and apps, as they cannot be downloaded directly
-                if mime_type in ['application/vnd.google-apps.folder', 'application/vnd.google-apps.site']:
+                if file_id in downloaded_ids:
+                    print(f"Already downloaded, skipping: {file_name}")
                     continue
-                
+
                 file_count += 1
                 print(f"Processing file {file_count}: {file_name} ({mime_type})")
-                download_file(service, file_id, file_name, mime_type, DOWNLOAD_PATH)
+                downloaded_name = download_file(service, file_id, file_name, mime_type, DOWNLOAD_PATH)
                 metadata_rows.append(
                     {
                         "id": file_id,
                         "name": file_name,
+                        "downloaded_name": downloaded_name,
                         "mimeType": mime_type,
                         "createdTime": file_item.get("createdTime"),
                         "modifiedTime": file_item.get("modifiedTime"),
@@ -183,11 +223,13 @@ def main():
                 break
         
         if metadata_rows:
-            with METADATA_CSV.open("w", newline="") as f:
+            write_header = not METADATA_CSV.exists()
+            with METADATA_CSV.open("a", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=metadata_rows[0].keys())
-                writer.writeheader()
+                if write_header:
+                    writer.writeheader()
                 writer.writerows(metadata_rows)
-            print(f"Metadata written to: {METADATA_CSV}")
+            print(f"Metadata updated: {METADATA_CSV}")
 
         print(f"Finished. Downloaded a total of {file_count} files.")
 
