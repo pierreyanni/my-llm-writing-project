@@ -25,3 +25,6 @@ Quick start
 How to use your own data
 - Edit the `documents_to_ingest` list in `ingest_data.py` with your text and metadata.
 - Rerun `python ingest_data.py`; it will generate new embeddings and insert them.
+
+Project tracking
+- See `TODO.md` for the current task list and next priorities.
