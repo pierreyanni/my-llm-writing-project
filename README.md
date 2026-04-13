@@ -1,30 +1,92 @@
 my-llm-writing-project
 ======================
 
-A minimal example that wires together Postgres + pgvector, a SentenceTransformer model, and a pair of scripts that embed sample text and store it with metadata. The goal is to provide a simple starting point for experimenting with retrieval-augmented generation workflows.
-The final goal is to build a database with all my writings in electronic form (dropbox, google drive, notion, emails, etc), use a RAG and LLM pipeline to answer all sorts of questions about what I wrote over the last 20 years.
+A RAG pipeline that ingests personal writing from Dropbox and Google Drive into a
+PostgreSQL + pgvector database for semantic search. The end goal is a searchable
+archive of 20+ years of writing, queryable with natural language.
 
+## What it does
 
-What it does
-- Runs a basic greeting via `main.py` to verify the environment.
-- Creates a Postgres schema with a `documents` table and vector column (`setup_database.py`).
-- Loads the SentenceTransformer model `all-MiniLM-L6-v2`, generates embeddings for sample snippets, and stores them with metadata (`ingest_data.py`).
-- Can be extended by swapping in your own text to turn this into a small RAG sandbox.
+1. Downloads `.txt`, `.docx`, and `.pptx` files from Dropbox and Google Drive
+2. Extracts plain text from each file
+3. Embeds the text with `sentence-transformers/all-MiniLM-L6-v2` (384-dim vectors)
+4. Stores content, embeddings, and metadata in PostgreSQL via pgvector
+5. Tracks downloaded files so repeated runs only process new documents
 
-Prerequisites
+## Prerequisites
+
 - Python 3.13+
-- Postgres with the pgvector extension installed and reachable from this machine
-- A `.env` (or environment variables) supplying `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
+- PostgreSQL with the pgvector extension
+- A `.env` file (copy `.env.example` and fill in your values)
+- Dropbox access token (see `.env.example`)
+- Google Drive OAuth credentials (see `.env.example`)
 
-Quick start
-- `pip install -e .` to install dependencies
-- `python main.py` to confirm the environment works
-- `python setup_database.py` to create the table and enable vector storage
-- `python ingest_data.py` to embed the provided sample documents (swap in your own content when ready)
+### Database setup
 
-How to use your own data
-- Edit the `documents_to_ingest` list in `ingest_data.py` with your text and metadata.
-- Rerun `python ingest_data.py`; it will generate new embeddings and insert them.
+Run once as a superuser to create the database and enable the vector extension:
 
-Project tracking
-- See `TODO.md` for the current task list and next priorities.
+```bash
+createdb rag_db
+psql -d rag_db -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+```
+
+Then run the schema setup:
+
+```bash
+python setup_database.py
+```
+
+Use `--reset` to wipe and recreate the table (destructive):
+
+```bash
+python setup_database.py --reset
+```
+
+## Quick start
+
+```bash
+# 1. Install dependencies
+uv sync
+
+# 2. Set up environment
+cp .env.example .env
+# Edit .env with your credentials
+
+# 3. Create the database schema
+python setup_database.py
+
+# 4. Download documents from your sources
+python data/dropbox/download_dropbox_files.py
+python data/drive/download_drive_files.py
+
+# 5. Ingest into the database
+python ingest_data.py
+```
+
+Steps 4 and 5 are idempotent — safe to re-run. Already-downloaded and
+already-ingested files are skipped automatically.
+
+## Project structure
+
+```
+.
+├── data/
+│   ├── utils.py                        # Shared filename helpers
+│   ├── dropbox/
+│   │   ├── download_dropbox_files.py   # Download from Dropbox
+│   │   └── documents/                  # Downloaded files + metadata.csv (gitignored)
+│   └── drive/
+│       ├── download_drive_files.py     # Download from Google Drive
+│       ├── credentials.json            # OAuth credentials (gitignored)
+│       ├── token.json                  # Cached OAuth token (gitignored)
+│       └── documents/                  # Downloaded files + metadata.csv (gitignored)
+├── ingest_data.py                      # Embed and insert into DB
+├── setup_database.py                   # Create DB schema
+├── main.py                             # Sanity check
+├── .env.example                        # Environment variable template
+└── TODO.md                             # Project task tracking
+```
+
+## Project tracking
+
+See [TODO.md](TODO.md) for the current task list and next priorities.

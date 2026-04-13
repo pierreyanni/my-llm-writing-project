@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import os
 import psycopg
@@ -13,7 +14,6 @@ DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_NAME = os.getenv("DB_NAME")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
-HF_TOKEN = os.getenv("HF_TOKEN")
 
 
 # A good general-purpose model from Hugging Face is 'all-MiniLM-L6-v2',
@@ -22,10 +22,12 @@ EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 EMBEDDING_DIMENSION = 384
 
 
-async def setup_database():
+async def setup_database(reset: bool = False):
     """
     Connects to the database, enables the vector extension,
     and creates the 'documents' table tailored for Hugging Face embeddings.
+
+    Pass reset=True to drop and recreate the table (destructive).
     """
     conn = None
     try:
@@ -42,22 +44,21 @@ async def setup_database():
         async with conn.cursor() as cur:
             # NOTE: The 'vector' extension should be enabled once by a superuser.
             # Example: `sudo -u postgres psql -d rag_db -c 'CREATE EXTENSION IF NOT EXISTS vector;'`
-            
-            # 1. Drop the existing table for a clean setup (optional, but for dev)
-            print("ℹ️  Dropping 'documents' table if it exists...")
-            await cur.execute("DROP TABLE IF EXISTS documents;")
 
-            # 2. Create the 'documents' table with the correct vector dimension
-            print(f"✅ Creating 'documents' table with embedding dimension {EMBEDDING_DIMENSION} for model {EMBEDDING_MODEL_NAME}...")
+            if reset:
+                print("ℹ️  --reset flag set: dropping 'documents' table...")
+                await cur.execute("DROP TABLE IF EXISTS documents;")
+
+            print(f"✅ Creating 'documents' table (if not exists) with embedding dimension {EMBEDDING_DIMENSION}...")
             await cur.execute(f"""
-                CREATE TABLE documents (
+                CREATE TABLE IF NOT EXISTS documents (
                     id BIGSERIAL PRIMARY KEY,
                     content TEXT NOT NULL,
                     metadata JSONB,
                     embedding VECTOR({EMBEDDING_DIMENSION})
                 );
             """)
-            
+
             await conn.commit()
             print("✅ Database setup complete. The 'documents' table is ready for Hugging Face embeddings.")
 
@@ -73,5 +74,11 @@ async def setup_database():
 
 
 if __name__ == "__main__":
-    # Run the asynchronous setup function
-    asyncio.run(setup_database())
+    parser = argparse.ArgumentParser(description="Set up the RAG database schema.")
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="Drop and recreate the documents table (WARNING: deletes all data).",
+    )
+    args = parser.parse_args()
+    asyncio.run(setup_database(reset=args.reset))
